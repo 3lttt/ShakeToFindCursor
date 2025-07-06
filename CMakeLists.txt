@@ -27,6 +27,9 @@ if(MSVC)
         /EHsc
         /utf-8
     )
+    set_target_properties(${PROJECT_NAME}  PROPERTIES
+        LINK_FLAGS "/MANIFEST /MANIFESTUAC:\"level='requireAdministrator' uiAccess='false'\" "
+    )
 else()
     target_compile_options(${PROJECT_NAME} 
         PRIVATE 
