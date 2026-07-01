@@ -31,9 +31,11 @@ class CursorConfig {
   static constexpr int kMinDirectionChanges = 5;        // Minimum direction changes required
   static constexpr double kMinMovementSpeed = 800.0;    // Minimum speed in pixels/second
   static constexpr int kMaxTimeWindow = 500;            // Time window in milliseconds
-  static constexpr int kEnlargeDurationMs = 500;        // Cursor enlargement duration (milliseconds)
+  static constexpr int kEnlargeDurationMs = 800;       // Cursor enlargement duration (milliseconds)
+  static constexpr int kGrowAnimationMs = 150;         // Grow animation duration
+  static constexpr int kShrinkAnimationMs = 200;       // Shrink animation duration
   static constexpr UINT_PTR kTimerId = 1;               // Timer ID
-  static constexpr UINT kTimerInterval = 100;           // Timer interval (milliseconds)
+  static constexpr UINT kTimerInterval = 16;            // Timer interval for smooth animation (~60 FPS)
   static constexpr UINT kTrayIconId = 1;                // Tray icon ID
   static constexpr UINT kTrayIconMessage = WM_APP + 1;  // Tray message ID
   static constexpr UINT kMenuExitId = 2000;             // Exit menu item ID
@@ -266,113 +268,39 @@ class CursorUtils {
       return nullptr;
     }
 
-    // Get cursor information
     ICONINFO icon_info;
     if (!GetIconInfo(src_cursor, &icon_info)) {
       return nullptr;
     }
 
-    // Use RAII to manage bitmap resources
+    // RAII cleanup for bitmap resources returned by GetIconInfo
     std::unique_ptr<std::remove_pointer<HBITMAP>::type, decltype(&DeleteObject)>
         color_bitmap(icon_info.hbmColor, DeleteObject);
     std::unique_ptr<std::remove_pointer<HBITMAP>::type, decltype(&DeleteObject)>
         mask_bitmap(icon_info.hbmMask, DeleteObject);
 
-    // Get bitmap information
+    // Get bitmap dimensions (use color bitmap if available, otherwise mask)
     BITMAP bm;
     if (!GetObject(icon_info.hbmColor ? icon_info.hbmColor : icon_info.hbmMask,
                    sizeof(BITMAP), &bm)) {
       return nullptr;
     }
 
-    // Calculate new dimensions
+    // For monochrome cursors (hbmColor == NULL), hbmMask height is 2x the
+    // actual cursor height (AND mask + XOR mask stacked vertically).
+    int cursor_height = icon_info.hbmColor ? bm.bmHeight : bm.bmHeight / 2;
+
     int new_width = static_cast<int>(bm.bmWidth * scale_factor);
-    int new_height = static_cast<int>(bm.bmHeight * scale_factor);
+    int new_height = static_cast<int>(cursor_height * scale_factor);
+    if (new_width <= 0 || new_height <= 0) return nullptr;
 
-    // Create compatible DC
-    HDC screen_dc = GetDC(nullptr);
-    if (!screen_dc) {
-      return nullptr;
-    }
-    HDC src_dc = CreateCompatibleDC(screen_dc);
-    HDC dst_dc = CreateCompatibleDC(screen_dc);
-    if (!src_dc || !dst_dc) {
-      if (src_dc) DeleteDC(src_dc);
-      if (dst_dc) DeleteDC(dst_dc);
-      ReleaseDC(nullptr, screen_dc);
-      return nullptr;
-    }
+    // Use CopyImage for scaling. Windows handles the alpha channel and mask
+    // bitmap correctly, producing smooth anti-aliased edges when scaling.
+    // CopyImage with IMAGE_CURSOR creates a new cursor scaled to the requested size.
+    HCURSOR scaled = (HCURSOR)CopyImage(src_cursor, IMAGE_CURSOR, new_width,
+                                        new_height, 0);
 
-    // Create new color bitmap and mask bitmap
-    HBITMAP new_color = nullptr;
-    HBITMAP new_mask = nullptr;
-    HCURSOR new_cursor = nullptr;
-
-    do {
-      // Create enlarged color bitmap
-      BITMAPINFO bmi = {0};
-      bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-      bmi.bmiHeader.biWidth = new_width;
-      bmi.bmiHeader.biHeight = new_height;
-      bmi.bmiHeader.biPlanes = 1;
-      bmi.bmiHeader.biBitCount = 32;
-      bmi.bmiHeader.biCompression = BI_RGB;
-
-      void* color_bits = nullptr;
-      new_color = CreateDIBSection(screen_dc, &bmi, DIB_RGB_COLORS, &color_bits,
-                                   nullptr, 0);
-      if (!new_color) break;
-
-      // Create mask bitmap
-      new_mask = CreateBitmap(new_width, new_height, 1, 1, nullptr);
-      if (!new_mask) break;
-
-      // Select source bitmap
-      HBITMAP old_src_color = (HBITMAP)SelectObject(
-          src_dc, icon_info.hbmColor ? icon_info.hbmColor : icon_info.hbmMask);
-      HBITMAP old_dst_color = (HBITMAP)SelectObject(dst_dc, new_color);
-
-      // Perform scaling
-      SetStretchBltMode(dst_dc, HALFTONE);
-      SetBrushOrgEx(dst_dc, 0, 0, nullptr);
-      StretchBlt(dst_dc, 0, 0, new_width, new_height, src_dc, 0, 0, bm.bmWidth,
-                 bm.bmHeight, SRCCOPY);
-
-      // If there is a color bitmap, also process the mask bitmap
-      if (icon_info.hbmColor) {
-        SelectObject(src_dc, icon_info.hbmMask);
-        SelectObject(dst_dc, new_mask);
-        StretchBlt(dst_dc, 0, 0, new_width, new_height, src_dc, 0, 0,
-                   bm.bmWidth, bm.bmHeight, SRCCOPY);
-      }
-
-      // Restore DC
-      SelectObject(src_dc, old_src_color);
-      SelectObject(dst_dc, old_dst_color);
-
-      // Create new cursor
-      ICONINFO new_icon_info = {0};
-      new_icon_info.fIcon =
-          FALSE;  // Specify creating a cursor instead of an icon
-      new_icon_info.xHotspot =
-          static_cast<DWORD>(icon_info.xHotspot * scale_factor);
-      new_icon_info.yHotspot =
-          static_cast<DWORD>(icon_info.yHotspot * scale_factor);
-      new_icon_info.hbmMask = new_mask;
-      new_icon_info.hbmColor = new_color;
-
-      new_cursor = CreateIconIndirect(&new_icon_info);
-
-    } while (false);
-
-    // Clean up resources
-    if (new_color) DeleteObject(new_color);
-    if (new_mask) DeleteObject(new_mask);
-    DeleteDC(src_dc);
-    DeleteDC(dst_dc);
-    ReleaseDC(nullptr, screen_dc);
-
-    return new_cursor;
+    return scaled;
   }
 };
 
@@ -389,27 +317,26 @@ class LargeCursor {
  public:
   LargeCursor(LPCWSTR cursor_name, DWORD system_cursor_id)
       : system_cursor_id_(system_cursor_id) {
-    // Load the system cursor
     original_cursor_ = CopyCursor(LoadCursorW(nullptr, cursor_name));
     if (!original_cursor_) {
       throw std::runtime_error("Failed to load system cursor");
     }
-
-    // Create enlarged cursor
-    large_cursor_ = CursorUtils::ScaleCursor(
-        original_cursor_, CursorConfig::kScaleFactor);  // Enlarge by 2 times
-    if (!large_cursor_) {
-      throw std::runtime_error("Failed to create large cursor");
-    }
   }
 
-  void Enlarge() {
-    if (large_cursor_) {
-      HCURSOR cursor_copy = CopyCursor(large_cursor_);
+  void ApplyScale(double scale_factor) {
+    if (scale_factor <= 1.0001) {
+      Restore();
+      return;
+    }
+
+    HCURSOR scaled = CursorUtils::ScaleCursor(original_cursor_, scale_factor);
+    if (scaled && scaled != original_cursor_) {
+      // CopyCursor creates an independent copy that SetSystemCursor can own.
+      HCURSOR cursor_copy = CopyCursor(scaled);
+      DestroyCursor(scaled);
       if (cursor_copy) {
         SetSystemCursor(cursor_copy, system_cursor_id_);
-      } else {
-        DestroyCursor(cursor_copy);
+        current_scale_ = scale_factor;
       }
     }
   }
@@ -419,6 +346,7 @@ class LargeCursor {
       HCURSOR cursor_copy = CopyCursor(original_cursor_);
       if (cursor_copy) {
         SetSystemCursor(cursor_copy, system_cursor_id_);
+        current_scale_ = 1.0;
       } else {
         DestroyCursor(cursor_copy);
       }
@@ -429,22 +357,18 @@ class LargeCursor {
     if (original_cursor_) {
       DestroyCursor(original_cursor_);
     }
-    if (large_cursor_) {
-      DestroyCursor(large_cursor_);
-    }
   }
 
  private:
   DWORD system_cursor_id_;
   HCURSOR original_cursor_ = nullptr;
-  HCURSOR large_cursor_ = nullptr;
+  double current_scale_ = 1.0;
 };
 
 // Large cursor manager class
 class LargeCursorManager {
  public:
   LargeCursorManager() {
-    // Create large cursor for each system cursor
     large_cursors_.push_back(
         std::make_unique<LargeCursor>(IDC_ARROW, OCR_NORMAL));
     large_cursors_.push_back(
@@ -470,9 +394,9 @@ class LargeCursorManager {
         std::make_unique<LargeCursor>(IDC_APPSTARTING, OCR_APPSTARTING));
   }
 
-  void EnlargeAll() {
+  void ApplyScale(double scale_factor) {
     for (const auto& cursor : large_cursors_) {
-      cursor->Enlarge();
+      cursor->ApplyScale(scale_factor);
     }
   }
 
@@ -485,54 +409,123 @@ class LargeCursorManager {
  private:
   std::vector<std::unique_ptr<LargeCursor>> large_cursors_;
 };
-
-// Cursor state management class
 class CursorState {
  public:
   CursorState() {}
 
   ~CursorState() {
     DEBUG_LOG("CursorState destroyed");
-    // Use SystemParametersInfo to restore all system cursors
     if (SystemParametersInfo(SPI_SETCURSORS, 0, nullptr, SPIF_SENDCHANGE)) {
-      is_enlarged_ = false;
+      state_ = kIdle;
     }
   }
 
   void Enlarge() {
-    if (!is_enlarged_) {
-      // Enlarge all system cursors
-      large_cursor_manager_.EnlargeAll();
-      is_enlarged_ = true;
+    if (state_ == kIdle) {
+      state_ = kGrowing;
+      enlarge_start_time_ = std::chrono::high_resolution_clock::now();
+    } else if (state_ == kShrinking) {
+      // Re-trigger from shrink: jump back to full size and hold
+      ApplyScale(CursorConfig::kScaleFactor);
+      state_ = kHolding;
+      enlarge_start_time_ = std::chrono::high_resolution_clock::now();
+      last_apply_time_ = std::chrono::high_resolution_clock::now();
+    } else if (state_ == kHolding) {
+      // Re-trigger during hold: extend the hold duration
       enlarge_start_time_ = std::chrono::high_resolution_clock::now();
     }
   }
 
   void RestoreIfNeeded() {
-    if (is_enlarged_) {
-      auto now = std::chrono::high_resolution_clock::now();
-      auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-                         now - enlarge_start_time_)
-                         .count();
+    if (state_ == kIdle) return;
 
-      if (elapsed > CursorConfig::kEnlargeDurationMs) {
-        RestoreOriginalCursor();
+    auto now = std::chrono::high_resolution_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now - enlarge_start_time_)
+                       .count();
+
+    // Frame throttle: limit cursor updates to ~30 FPS to reduce flicker
+    auto since_last_apply =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            now - last_apply_time_)
+            .count();
+    bool should_apply = (since_last_apply >= 33);
+
+    double current_scale = 1.0;
+
+    switch (state_) {
+      case kGrowing: {
+        if (elapsed >= CursorConfig::kGrowAnimationMs) {
+          current_scale = CursorConfig::kScaleFactor;
+          state_ = kHolding;
+          hold_start_time_ = now;
+          ApplyScale(current_scale);
+          last_apply_time_ = now;
+        } else if (should_apply) {
+          double t = static_cast<double>(elapsed) /
+                     CursorConfig::kGrowAnimationMs;
+          // Ease-out cubic for smooth deceleration
+          double eased = 1.0 - std::pow(1.0 - t, 3.0);
+          current_scale = 1.0 + (CursorConfig::kScaleFactor - 1.0) * eased;
+          ApplyScale(current_scale);
+          last_apply_time_ = now;
+        }
+        break;
       }
+      case kHolding: {
+        if (elapsed >= CursorConfig::kEnlargeDurationMs) {
+          state_ = kShrinking;
+          shrink_start_time_ = now;
+        }
+        break;
+      }
+      case kShrinking: {
+        auto shrink_elapsed =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - shrink_start_time_)
+                .count();
+        if (shrink_elapsed >= CursorConfig::kShrinkAnimationMs) {
+          RestoreOriginalCursor();
+          state_ = kIdle;
+        } else if (should_apply) {
+          double t = static_cast<double>(shrink_elapsed) /
+                     CursorConfig::kShrinkAnimationMs;
+          // Ease-in cubic for smooth acceleration
+          double eased = t * t * t;
+          current_scale =
+              CursorConfig::kScaleFactor -
+              (CursorConfig::kScaleFactor - 1.0) * eased;
+          ApplyScale(current_scale);
+          last_apply_time_ = now;
+        }
+        break;
+      }
+      default:
+        break;
     }
   }
-
  private:
-  void RestoreOriginalCursor() {
-    if (is_enlarged_) {
-      // Restore all system cursors
-      large_cursor_manager_.RestoreAll();
-      is_enlarged_ = false;
-    }
+  void ApplyScale(double scale) {
+    large_cursor_manager_.ApplyScale(scale);
   }
 
+  void RestoreOriginalCursor() {
+    large_cursor_manager_.RestoreAll();
+  }
+
+  enum AnimationState {
+    kIdle,
+    kGrowing,
+    kHolding,
+    kShrinking
+  };
+
+  AnimationState state_ = kIdle;
   LargeCursorManager large_cursor_manager_;
-  bool is_enlarged_ = false;
   std::chrono::high_resolution_clock::time_point enlarge_start_time_;
+  std::chrono::high_resolution_clock::time_point hold_start_time_;
+  std::chrono::high_resolution_clock::time_point shrink_start_time_;
+  std::chrono::high_resolution_clock::time_point last_apply_time_;
 };
 
 // Mouse movement detector class with shake pattern recognition
