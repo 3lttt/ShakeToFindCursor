@@ -28,7 +28,7 @@ class CursorConfig {
  public:
   static constexpr double kScaleFactor = 3.5;           // Cursor enlargement factor
   static constexpr size_t kHistorySize = 10;            // Keep last 10 movements
-  static constexpr int kMinDirectionChanges = 5;        // Minimum direction changes required
+  static constexpr int kMinDirectionChanges = 3;        // Minimum direction changes required
   static constexpr double kMinMovementSpeed = 600.0;    // Minimum speed in pixels/second
   static constexpr int kMaxTimeWindow = 500;            // Time window in milliseconds
   static constexpr int kEnlargeDurationMs = 800;       // Cursor enlargement duration (milliseconds)
